@@ -29,7 +29,11 @@ HEADERS = {
 
 def is_shopee_url(text: str) -> bool:
     """Return True if the text contains a Shopee link."""
-    return bool(re.search(r"(shopee\.[a-z.]+|shope\.ee|s\.shopee)", text, re.IGNORECASE))
+    return bool(re.search(
+        r"(shopee\.[a-z.]+|shope\.ee|s\.shopee|shp\.ee|br\.shp\.ee)",
+        text,
+        re.IGNORECASE,
+    ))
 
 
 def resolver_url(url_compartilhada: str) -> str:
@@ -103,6 +107,8 @@ def extrair_video_via_api(shop_id: str, item_id: str) -> str | None:
 
 def extrair_video_via_html(url_real: str) -> str | None:
     """Fallback: scrape the HTML page for video URLs."""
+    import json as _json
+
     html = requests.get(url_real, headers=HEADERS, timeout=15).text
     soup = BeautifulSoup(html, "lxml")
 
@@ -116,13 +122,24 @@ def extrair_video_via_html(url_real: str) -> str | None:
         if source_tag and source_tag.get("src"):
             return source_tag["src"]
 
-    # Search for mp4/webm URLs inside script tags
     video_pattern = re.compile(
         r"https?://[^\s\"'<>]*\.(mp4|mov|webm)[^\s\"'<>]*",
         re.IGNORECASE,
     )
+
     for script in soup.find_all("script"):
-        script_text = script.string or ""
+        script_text = script.string or script.get_text() or ""
+        if not script_text:
+            continue
+
+        # Priority: grab watermarkVideoUrl from JSON (Shopee share-video pages)
+        wm_match = re.search(r'"watermarkVideoUrl"\s*:\s*"([^"]+)"', script_text)
+        if wm_match:
+            video_url = wm_match.group(1).replace("\\u002F", "/")
+            logger.info("Found watermarkVideoUrl: %s", video_url)
+            return video_url
+
+        # Generic mp4/webm URL search
         match = video_pattern.search(script_text)
         if match:
             return match.group(0).rstrip(",;}")
