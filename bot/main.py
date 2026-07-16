@@ -1,6 +1,8 @@
 import logging
 import os
 import re
+import subprocess
+import tempfile
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
@@ -161,6 +163,65 @@ def extrair_video_via_html(url_real: str) -> str | None:
     return None
 
 
+def remover_marca_dagua(video_url: str) -> bytes | None:
+    """
+    Baixa o vídeo e aplica desfoque nos cantos onde ficam as marcas d'água
+    (logo ShopeeVideo no canto superior esquerdo e @usuário no inferior esquerdo).
+    Retorna os bytes do vídeo processado, ou None em caso de falha.
+    """
+    tmp_in_path = None
+    tmp_out_path = None
+    try:
+        logger.info("Baixando vídeo para remover marca d'água...")
+        resp = requests.get(video_url, headers=HEADERS, timeout=60, stream=True)
+        if resp.status_code != 200:
+            logger.warning("Falha ao baixar vídeo: status %s", resp.status_code)
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_in:
+            for chunk in resp.iter_content(chunk_size=65536):
+                tmp_in.write(chunk)
+            tmp_in_path = tmp_in.name
+
+        tmp_out_path = tmp_in_path[:-4] + '_out.mp4'
+
+        # Desfoca: canto superior esquerdo (logo Shopee) e inferior esquerdo (usuário)
+        vf = (
+            "split=3[a][b][c];"
+            "[b]crop=iw*0.55:ih*0.13:0:0,boxblur=20:5[top];"
+            "[c]crop=iw*0.55:ih*0.13:0:ih-ih*0.13,boxblur=20:5[bot];"
+            "[a][top]overlay=0:0[tmp];"
+            "[tmp][bot]overlay=0:H-h"
+        )
+
+        cmd = [
+            "ffmpeg", "-y", "-i", tmp_in_path,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "copy",
+            tmp_out_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=180)
+        if result.returncode != 0:
+            logger.error("FFmpeg falhou: %s", result.stderr.decode()[-600:])
+            return None
+
+        with open(tmp_out_path, "rb") as f:
+            return f.read()
+
+    except Exception:
+        logger.exception("Erro ao remover marca d'água")
+        return None
+    finally:
+        for path in [tmp_in_path, tmp_out_path]:
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
+
 def extrair_video_shopee(url_compartilhada: str) -> str | None:
     """
     Main extraction function.
@@ -258,11 +319,23 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if link_video:
         try:
+            await status_msg.edit_text("🎞️ Removendo marca d'água, aguarde...")
+            video_bytes = remover_marca_dagua(link_video)
+
             await status_msg.edit_text("📤 Enviando o vídeo...")
-            await update.message.reply_video(
-                video=link_video,
-                caption="🎥 Aqui está o seu vídeo da Shopee!",
-            )
+            if video_bytes:
+                from telegram import InputFile
+                import io
+                await update.message.reply_video(
+                    video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                    caption="🎥 Aqui está o seu vídeo da Shopee!",
+                )
+            else:
+                # Fallback: envia o link direto se o processamento falhar
+                await update.message.reply_video(
+                    video=link_video,
+                    caption="🎥 Aqui está o seu vídeo da Shopee! (sem remoção de marca)",
+                )
             await status_msg.delete()
         except Exception as e:
             logger.exception("Failed to send video")
