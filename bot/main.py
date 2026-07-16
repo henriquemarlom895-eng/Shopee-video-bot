@@ -178,15 +178,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    texto = update.message.text.strip()
+def extrair_urls_da_mensagem(message) -> list[str]:
+    """
+    Extract all URLs from a Telegram message, including:
+    - Plain text
+    - Clickable link entities (url / text_link)
+    """
+    urls = []
+    text = message.text or message.caption or ""
 
-    if not is_shopee_url(texto):
-        await update.message.reply_text(
+    # URLs embedded as entities (forwarded messages, inline links, etc.)
+    entities = message.entities or message.caption_entities or []
+    for entity in entities:
+        if entity.type == "url":
+            # Slice the raw URL from the message text
+            url = text[entity.offset: entity.offset + entity.length]
+            urls.append(url)
+        elif entity.type == "text_link" and entity.url:
+            urls.append(entity.url)
+
+    # Also add the full plain text (catches links typed as plain text)
+    if text:
+        urls.append(text)
+
+    return urls
+
+
+async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    todas_urls = extrair_urls_da_mensagem(message)
+    logger.info("URLs extraídas da mensagem: %s", todas_urls)
+
+    # Find the first Shopee URL among all extracted URLs
+    url_shopee = next((u for u in todas_urls if is_shopee_url(u)), None)
+
+    if not url_shopee:
+        await message.reply_text(
             "❌ Por favor, envie um link válido da Shopee.\n"
             "Exemplos: https://shope.ee/... ou https://shopee.com.br/..."
         )
         return
+
+    texto = url_shopee
 
     status_msg = await update.message.reply_text("⏳ Processando o link, aguarde...")
 
