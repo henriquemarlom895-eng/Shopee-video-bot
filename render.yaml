@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: shopee-video-bot
+    runtime: python
+    buildCommand: pip install -r bot/requirements.txt
+    startCommand: cd bot && python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+    autoDeploy: true

@@ -276,8 +276,23 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, processar_mensagem)
     )
 
-    logger.info("Bot iniciado. Aguardando mensagens...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    webhook_url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+    port = int(os.environ.get("PORT", 8443))
+
+    if webhook_url:
+        # Production: webhook mode (used on Render, Railway, etc.)
+        logger.info("Iniciando em modo webhook na porta %d...", port)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TOKEN,
+            webhook_url=f"{webhook_url}/{TOKEN}",
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        # Development: polling mode (used on Replit locally)
+        logger.info("Iniciando em modo polling...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
