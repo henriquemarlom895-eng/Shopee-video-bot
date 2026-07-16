@@ -132,11 +132,25 @@ def extrair_video_via_html(url_real: str) -> str | None:
         if not script_text:
             continue
 
-        # Priority: grab watermarkVideoUrl from JSON (Shopee share-video pages)
+        # Priority 1: originVideoUrl (sem marca d'água)
+        origin_match = re.search(r'"originVideoUrl"\s*:\s*"([^"]+)"', script_text)
+        if origin_match:
+            video_url = origin_match.group(1).replace("\\u002F", "/")
+            logger.info("Found originVideoUrl (sem marca): %s", video_url)
+            return video_url
+
+        # Priority 2: videoUrl genérico (geralmente sem marca)
+        plain_match = re.search(r'"videoUrl"\s*:\s*"([^"]+)"', script_text)
+        if plain_match:
+            video_url = plain_match.group(1).replace("\\u002F", "/")
+            logger.info("Found videoUrl: %s", video_url)
+            return video_url
+
+        # Priority 3: watermarkVideoUrl (com marca d'água, último recurso)
         wm_match = re.search(r'"watermarkVideoUrl"\s*:\s*"([^"]+)"', script_text)
         if wm_match:
             video_url = wm_match.group(1).replace("\\u002F", "/")
-            logger.info("Found watermarkVideoUrl: %s", video_url)
+            logger.info("Found watermarkVideoUrl (com marca): %s", video_url)
             return video_url
 
         # Generic mp4/webm URL search
