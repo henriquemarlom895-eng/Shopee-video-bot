@@ -29,58 +29,133 @@ HEADERS = {
 
 def is_shopee_url(text: str) -> bool:
     """Return True if the text contains a Shopee link."""
-    return bool(re.search(r"(shopee\.[a-z.]+|shope\.ee)", text, re.IGNORECASE))
+    return bool(re.search(r"(shopee\.[a-z.]+|shope\.ee|s\.shopee)", text, re.IGNORECASE))
+
+
+def resolver_url(url_compartilhada: str) -> str:
+    """Follow redirects and return the final URL."""
+    response = requests.get(
+        url_compartilhada,
+        headers=HEADERS,
+        allow_redirects=True,
+        timeout=15,
+    )
+    return response.url
+
+
+def extrair_ids_da_url(url: str):
+    """
+    Extract (shop_id, item_id) from a Shopee product URL.
+    Supports formats:
+      - shopee.com.br/{name}/{shop_id}/{item_id}
+      - shopee.com.br/product/{shop_id}/{item_id}
+      - shopee.com.br/i/{shop_id}/{item_id}
+    Returns (shop_id, item_id) as strings, or (None, None).
+    """
+    # Pattern: two consecutive numeric segments at the end of the path
+    match = re.search(r"/(\d+)/(\d+)(?:[?#]|$)", url)
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
+
+def extrair_video_via_api(shop_id: str, item_id: str) -> str | None:
+    """Call Shopee's internal API to get the product video URL."""
+    # Try Brazil endpoint first, then fallback to generic
+    endpoints = [
+        f"https://shopee.com.br/api/v4/item/get?itemid={item_id}&shopid={shop_id}",
+        f"https://shopee.com/api/v4/item/get?itemid={item_id}&shopid={shop_id}",
+    ]
+
+    api_headers = {
+        **HEADERS,
+        "Referer": "https://shopee.com.br/",
+        "X-API-SOURCE": "pc",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json",
+    }
+
+    for url in endpoints:
+        try:
+            resp = requests.get(url, headers=api_headers, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            # Navigate: data.data.video_info_list[0].default_format.video_url
+            item_data = data.get("data") or data.get("item") or {}
+            video_list = item_data.get("video_info_list") or []
+            for vid in video_list:
+                formats = vid.get("default_format") or {}
+                video_url = formats.get("video_url") or formats.get("url")
+                if video_url:
+                    logger.info("Found video via API: %s", video_url)
+                    return video_url
+                # Some responses use a flat structure
+                video_url = vid.get("video_url") or vid.get("url")
+                if video_url:
+                    logger.info("Found video via API (flat): %s", video_url)
+                    return video_url
+        except Exception:
+            logger.exception("API call failed for %s", url)
+
+    return None
+
+
+def extrair_video_via_html(url_real: str) -> str | None:
+    """Fallback: scrape the HTML page for video URLs."""
+    html = requests.get(url_real, headers=HEADERS, timeout=15).text
+    soup = BeautifulSoup(html, "lxml")
+
+    # Try <video> and <source> tags
+    video_tag = soup.find("video")
+    if video_tag:
+        src = video_tag.get("src")
+        if src:
+            return src
+        source_tag = video_tag.find("source")
+        if source_tag and source_tag.get("src"):
+            return source_tag["src"]
+
+    # Search for mp4/webm URLs inside script tags
+    video_pattern = re.compile(
+        r"https?://[^\s\"'<>]*\.(mp4|mov|webm)[^\s\"'<>]*",
+        re.IGNORECASE,
+    )
+    for script in soup.find_all("script"):
+        script_text = script.string or ""
+        match = video_pattern.search(script_text)
+        if match:
+            return match.group(0).rstrip(",;}")
+
+    return None
 
 
 def extrair_video_shopee(url_compartilhada: str) -> str | None:
     """
-    Follow the shared / shortened Shopee URL and attempt to extract
-    the direct video source URL from the product page.
-    Returns the video URL string, or None if not found.
+    Main extraction function.
+    1. Resolve the URL (follows short links).
+    2. Try Shopee's internal API (most reliable).
+    3. Fall back to HTML scraping.
     """
     try:
-        # Step 1 – resolve redirects (short links like shope.ee/xxx)
-        response = requests.get(
-            url_compartilhada,
-            headers=HEADERS,
-            allow_redirects=True,
-            timeout=15,
-        )
-        url_real = response.url
+        url_real = resolver_url(url_compartilhada)
         logger.info("Resolved URL: %s", url_real)
 
-        # Step 2 – fetch the real product page
-        html = requests.get(url_real, headers=HEADERS, timeout=15).text
-        soup = BeautifulSoup(html, "lxml")
+        shop_id, item_id = extrair_ids_da_url(url_real)
+        logger.info("Extracted IDs — shop_id: %s, item_id: %s", shop_id, item_id)
 
-        # Attempt 1 – plain <video src="..."> tag
-        video_tag = soup.find("video")
-        if video_tag:
-            src = video_tag.get("src")
-            if src:
-                logger.info("Found video via <video> tag: %s", src)
-                return src
-
-            # Sometimes the src is inside a <source> child
-            source_tag = video_tag.find("source")
-            if source_tag and source_tag.get("src"):
-                logger.info("Found video via <source> tag: %s", source_tag["src"])
-                return source_tag["src"]
-
-        # Attempt 2 – look for video URLs inside embedded JSON / script tags
-        video_pattern = re.compile(
-            r"https?://[^\s\"'<>]*\.(mp4|mov|webm)[^\s\"'<>]*",
-            re.IGNORECASE,
-        )
-        for script in soup.find_all("script"):
-            script_text = script.string or ""
-            match = video_pattern.search(script_text)
-            if match:
-                video_url = match.group(0).rstrip(",;}")
-                logger.info("Found video via script tag: %s", video_url)
+        # Attempt 1 – Shopee API (works even for JS-rendered pages)
+        if shop_id and item_id:
+            video_url = extrair_video_via_api(shop_id, item_id)
+            if video_url:
                 return video_url
 
-        logger.warning("No video found on page: %s", url_real)
+        # Attempt 2 – HTML scraping fallback
+        video_url = extrair_video_via_html(url_real)
+        if video_url:
+            return video_url
+
+        logger.warning("No video found for: %s", url_real)
         return None
 
     except Exception:
