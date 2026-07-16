@@ -284,28 +284,19 @@ async def processar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Método 1: URL original sem marca via CDN (rápido)
             link_limpo = url_sem_marca(link_video)
 
-            await status_msg.edit_text("📤 Enviando o vídeo...")
+            await status_msg.edit_text("📤 Baixando e enviando o vídeo...")
 
-            if link_limpo:
-                logger.info("Enviando URL sem marca: %s", link_limpo)
-                await update.message.reply_video(
-                    video=link_limpo,
-                    caption="🎥 Aqui está o seu vídeo da Shopee!",
-                )
-            else:
-                # Método 2: ffmpeg desfoca as marcas
-                logger.info("Usando ffmpeg para remover marcas...")
-                video_bytes = remover_marca_dagua_ffmpeg(link_video)
-                if video_bytes:
-                    await update.message.reply_video(
-                        video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                        caption="🎥 Aqui está o seu vídeo da Shopee!",
-                    )
-                else:
-                    await update.message.reply_video(
-                        video=link_video,
-                        caption="🎥 Aqui está o seu vídeo da Shopee!",
-                    )
+            url_final = link_limpo or link_video
+            logger.info("Baixando vídeo de: %s", url_final)
+
+            # Baixa o vídeo aqui e envia como arquivo (CDN bloqueia o Telegram direto)
+            resp = requests.get(url_final, headers=HEADERS, timeout=60, stream=True)
+            video_bytes = b"".join(resp.iter_content(chunk_size=65536))
+
+            await update.message.reply_video(
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                caption="🎥 Aqui está o seu vídeo da Shopee!",
+            )
 
             await status_msg.delete()
 
